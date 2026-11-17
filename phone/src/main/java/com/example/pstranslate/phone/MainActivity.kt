@@ -58,7 +58,7 @@ class MainActivity : Activity() {
             setOnClickListener { Link.send("SUB " + msg.text.toString().replace("\n", "\\n")) }
         }
         val clear = Button(this).apply { text = "Altyazıyı temizle"; setOnClickListener { Link.send("CLEAR") } }
-        val ver = TextView(this).apply { text = "Sürüm 0.3"; textSize = 12f }
+        val ver = TextView(this).apply { text = "Sürüm 0.4"; textSize = 12f }
         listOf(ver, status, code, connect, bottom, start, stop, msg, send, clear).forEach { root.addView(it) }
         setContentView(root)
     }

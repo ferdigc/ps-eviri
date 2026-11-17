@@ -19,6 +19,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
@@ -48,6 +49,10 @@ class CaptureService : Service() {
     private var autoBtn: TextView? = null
     private var statusView: TextView? = null
     private var busyStart = 0L
+    @Volatile private var lastFrame: Bitmap? = null
+    private var lastFrameAt = 0L
+    private val frameThread = HandlerThread("frames").apply { start() }
+    private val frameHandler = Handler(frameThread.looper)
 
     private var auto = false
     private val busy = AtomicBoolean(false)
@@ -119,11 +124,38 @@ class CaptureService : Service() {
     private fun setupCapture() {
         val dm = realMetrics()
         width = dm.widthPixels; height = dm.heightPixels; dpi = dm.densityDpi
-        reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        reader = newReader()
         vdisplay = projection!!.createVirtualDisplay(
             "pscap", width, height, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, null
         )
+    }
+
+    private fun newReader(): ImageReader {
+        val r = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        r.setOnImageAvailableListener({ rd ->
+            val img = try { rd.acquireLatestImage() } catch (e: Exception) { null }
+            if (img != null) {
+                try {
+                    val now = System.currentTimeMillis()
+                    if (now - lastFrameAt >= 400) {
+                        lastFrame = toBitmap(img)
+                        lastFrameAt = now
+                    }
+                } finally {
+                    img.close()
+                }
+            }
+        }, frameHandler)
+        return r
+    }
+
+    private fun toBitmap(img: android.media.Image): Bitmap {
+        val plane = img.planes[0]
+        val pad = plane.rowStride - plane.pixelStride * img.width
+        val full = Bitmap.createBitmap(img.width + pad / plane.pixelStride, img.height, Bitmap.Config.ARGB_8888)
+        full.copyPixelsFromBuffer(plane.buffer)
+        return if (pad > 0) Bitmap.createBitmap(full, 0, 0, img.width, img.height) else full
     }
 
     /** Ekran döndüyse yakalama boyutunu günceller. Değiştiyse true döner. */
@@ -132,7 +164,8 @@ class CaptureService : Service() {
         if (dm.widthPixels == width && dm.heightPixels == height) return false
         width = dm.widthPixels; height = dm.heightPixels; dpi = dm.densityDpi
         reader?.close()
-        reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        lastFrame = null
+        reader = newReader()
         vdisplay?.resize(width, height, dpi)
         vdisplay?.surface = reader!!.surface
         return true
@@ -154,7 +187,7 @@ class CaptureService : Service() {
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { setMargins(0, 8, 0, 8) }
         val sv = TextView(this).apply {
-            text = "Hazır (v0.3)"
+            text = "Hazır (v0.4)"
             textSize = 11f
             setTextColor(Color.YELLOW)
             maxWidth = 500
@@ -212,20 +245,17 @@ class CaptureService : Service() {
         }
         busyStart = now0
         if (ensureSize()) { busy.set(false); if (!isAuto) toast("Ekran boyutu değişti, tekrar bas"); return }
-        val img = reader?.acquireLatestImage()
-        if (img == null) { busy.set(false); if (!isAuto) toast("Görüntü alınamadı, tekrar bas"); return }
-        val bottomOnly = getSharedPreferences("p", MODE_PRIVATE).getBoolean("bottom", true)
-        val bmp = try {
-            val plane = img.planes[0]
-            val pad = plane.rowStride - plane.pixelStride * img.width
-            val full = Bitmap.createBitmap(img.width + pad / plane.pixelStride, img.height, Bitmap.Config.ARGB_8888)
-            full.copyPixelsFromBuffer(plane.buffer)
-            blankPanel(full)
-            val top = if (bottomOnly) img.height * 65 / 100 else 0
-            Bitmap.createBitmap(full, 0, top, img.width, img.height - top)
-        } finally {
-            img.close()
+        val frame = lastFrame
+        if (frame == null) {
+            busy.set(false)
+            if (!isAuto) toast("Henüz görüntü gelmedi. Remote Play ekranı açıkken tekrar bas")
+            return
         }
+        val bottomOnly = getSharedPreferences("p", MODE_PRIVATE).getBoolean("bottom", true)
+        val full = frame.copy(Bitmap.Config.ARGB_8888, true)
+        blankPanel(full)
+        val top = if (bottomOnly) full.height * 65 / 100 else 0
+        val bmp = Bitmap.createBitmap(full, 0, top, full.width, full.height - top)
         if (!isAuto && isBlack(bmp)) {
             busy.set(false)
             toast("Yakalanan görüntü SİYAH: Remote Play yakalamayı engelliyor olabilir")
@@ -294,6 +324,7 @@ class CaptureService : Service() {
         panel?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
         try { vdisplay?.release() } catch (_: Exception) {}
         try { reader?.close() } catch (_: Exception) {}
+        frameThread.quitSafely()
         projectionCallback?.let { projection?.unregisterCallback(it) }
         try { projection?.stop() } catch (_: Exception) {}
         projection = null
