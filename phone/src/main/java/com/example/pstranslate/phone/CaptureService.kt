@@ -190,7 +190,7 @@ class CaptureService : Service() {
     private fun captureOnce(isAuto: Boolean) {
         if (!Link.connected) { if (!isAuto) toast("TV bağlantısı yok"); return }
         if (!busy.compareAndSet(false, true)) return
-        if (ensureSize()) { busy.set(false); return }
+        if (ensureSize()) { busy.set(false); if (!isAuto) toast("Ekran boyutu değişti, tekrar bas"); return }
         val img = reader?.acquireLatestImage()
         if (img == null) { busy.set(false); if (!isAuto) toast("Görüntü alınamadı, tekrar bas"); return }
         val bottomOnly = getSharedPreferences("p", MODE_PRIVATE).getBoolean("bottom", true)
@@ -205,12 +205,27 @@ class CaptureService : Service() {
         } finally {
             img.close()
         }
+        if (!isAuto && isBlack(bmp)) {
+            busy.set(false)
+            toast("Yakalanan görüntü SİYAH: Remote Play yakalamayı engelliyor olabilir")
+            return
+        }
+        if (!isAuto) toast("Okunuyor…")
         recognizer.process(InputImage.fromBitmap(bmp, 0))
             .addOnSuccessListener { vt ->
                 val raw = vt.textBlocks.joinToString("\n") { it.text.replace("\n", " ") }.trim()
                 handleText(raw, isAuto)
             }
-            .addOnFailureListener { busy.set(false) }
+            .addOnFailureListener { e -> busy.set(false); toast("Okuma hatası: ${e.message}") }
+    }
+
+    private fun isBlack(b: Bitmap): Boolean {
+        var maxSum = 0
+        for (i in 0 until 20) for (j in 0 until 20) {
+            val c = b.getPixel(i * (b.width - 1) / 19, j * (b.height - 1) / 19)
+            maxSum = maxOf(maxSum, Color.red(c) + Color.green(c) + Color.blue(c))
+        }
+        return maxSum < 30
     }
 
     private fun handleText(raw: String, isAuto: Boolean) {
@@ -221,7 +236,7 @@ class CaptureService : Service() {
             if (isAuto) {
                 emptyCount++
                 if (emptyCount == 2 && lastText.isNotEmpty()) { Link.send("CLEAR"); lastText = "" }
-            } else toast("Çevrilecek İngilizce yazı bulunamadı")
+            } else toast("Yazı bulunamadı. Okunan: \"${raw.take(40)}\" (harf sayısı: $letters)")
             busy.set(false)
             return
         }
@@ -243,11 +258,12 @@ class CaptureService : Service() {
                         lastTranslation = tr
                         lastSent = System.currentTimeMillis()
                         Link.send("SUB " + tr.replace("\n", "\\n"))
+                        if (!isAuto) toast("Gönderildi: ${tr.take(40)}")
                         busy.set(false)
                     }
-                    .addOnFailureListener { busy.set(false) }
+                    .addOnFailureListener { e -> busy.set(false); toast("Çeviri hatası: ${e.message}") }
             }
-            .addOnFailureListener { toast("Çeviri modeli yok, internete bağlan"); busy.set(false) }
+            .addOnFailureListener { e -> toast("Çeviri modeli yok, internete bağlan: ${e.message}"); busy.set(false) }
     }
 
     override fun onDestroy() {
