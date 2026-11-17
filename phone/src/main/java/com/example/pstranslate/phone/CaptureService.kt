@@ -46,6 +46,8 @@ class CaptureService : Service() {
     private var wm: WindowManager? = null
     private var panel: LinearLayout? = null
     private var autoBtn: TextView? = null
+    private var statusView: TextView? = null
+    private var busyStart = 0L
 
     private var auto = false
     private val busy = AtomicBoolean(false)
@@ -151,6 +153,16 @@ class CaptureService : Service() {
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { setMargins(0, 8, 0, 8) }
+        val sv = TextView(this).apply {
+            text = "Hazır (v0.3)"
+            textSize = 11f
+            setTextColor(Color.YELLOW)
+            maxWidth = 500
+            setPadding(16, 8, 16, 8)
+            background = GradientDrawable().apply { cornerRadius = 16f; setColor(Color.argb(160, 20, 20, 20)) }
+        }
+        statusView = sv
+        p.addView(sv, lp)
         p.addView(button("Çevir") { captureOnce(false) }, lp)
         val a = button("Oto: KAPALI") { toggleAuto() }
         autoBtn = a
@@ -174,7 +186,10 @@ class CaptureService : Service() {
         if (auto) main.post(autoTick)
     }
 
-    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+    private fun toast(t: String) {
+        statusView?.text = t
+        Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+    }
 
     private fun blankPanel(bmp: Bitmap) {
         val p = panel ?: return
@@ -188,8 +203,14 @@ class CaptureService : Service() {
     }
 
     private fun captureOnce(isAuto: Boolean) {
+        if (!isAuto) toast("Basıldı")
         if (!Link.connected) { if (!isAuto) toast("TV bağlantısı yok"); return }
-        if (!busy.compareAndSet(false, true)) return
+        val now0 = System.currentTimeMillis()
+        if (!busy.compareAndSet(false, true)) {
+            if (now0 - busyStart < 10000) { if (!isAuto) toast("Önceki işlem sürüyor…"); return }
+            toast("Takılan işlem sıfırlandı")
+        }
+        busyStart = now0
         if (ensureSize()) { busy.set(false); if (!isAuto) toast("Ekran boyutu değişti, tekrar bas"); return }
         val img = reader?.acquireLatestImage()
         if (img == null) { busy.set(false); if (!isAuto) toast("Görüntü alınamadı, tekrar bas"); return }
@@ -251,6 +272,7 @@ class CaptureService : Service() {
             return
         }
         lastText = text
+        if (!isAuto) toast("Çevriliyor…")
         translator.downloadModelIfNeeded()
             .addOnSuccessListener {
                 translator.translate(text)
